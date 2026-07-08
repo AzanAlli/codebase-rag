@@ -7,3 +7,4 @@ test_repos/
 *.egg-info/
 .DS_Store
 chunks.jsonl
+.idea/
