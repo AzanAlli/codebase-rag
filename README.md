@@ -1,9 +1,18 @@
 # Codebase RAG
 
-An AST-aware retrieval system over source code. Instead of naive fixed-size
-text chunking (which cuts functions in half), this parses code into its
-syntax tree and extracts whole functions/classes/methods as chunks, with
-metadata (file path, line range, parent class, docstring) attached.
+Retrieval-augmented generation over a codebase, built to answer questions
+like *"where is rate limiting implemented?"* or *"what does this decorator
+do?"* with real, citable answers pointing at exact files and line numbers —
+not a hallucinated guess.
+
+Most RAG-over-code demos chunk files into fixed-size text blocks, which
+routinely slices a function in half and destroys its meaning. This project
+instead parses each file into its AST (via `tree-sitter`) and extracts whole
+functions, classes, and methods as chunks, carrying structural metadata
+(file path, line range, parent class, docstring) that a text splitter simply
+doesn't have access to.
+
+**Stack:** tree-sitter · Vertex AI embeddings · pgvector · Gemini · FastAPI
 
 ## Status: Day 1 complete — ingestion + chunking
 
