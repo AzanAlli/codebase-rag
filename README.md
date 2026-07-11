@@ -16,8 +16,44 @@ doesn't have access to.
 
 ## Status: Day 2 complete — embeddings + vector retrieval verified
 
-- ✅ Day 1: AST-aware chunking (tree-sitter)
+- ✅ Day 1: AST-aware chunking (tree-sitter) — 1,268 chunks from `pallets/click`
 - ✅ Day 2: embeddings (Vertex AI `text-embedding-004`) + storage (Supabase/pgvector), retrieval sanity-checked
+
+## Day 1: AST-aware chunking
+
+Most "RAG over code" tutorials split files into fixed-size text blocks (e.g.
+every 500 characters). That's fast to build but breaks the moment a chunk
+boundary lands in the middle of a function — the model retrieves half a
+function body with no idea what the other half does, and structural context
+(what class a method belongs to, what a function's docstring says) is lost
+entirely.
+
+`ingestion/parser.py` fixes this by walking each file's actual **abstract
+syntax tree** (via `tree-sitter`) instead of its raw text. It extracts
+`function_definition` and `class_definition` nodes directly, which means:
+
+- **Every chunk is a complete, syntactically valid unit** — a whole function, method, or class, never a fragment
+- **Docstrings are extracted separately from source**, not left buried inside the code — this matters for embedding later, since a docstring in plain English ("Parses positional arguments...") is often a better semantic match for a natural-language query than the code itself
+- **Parent-class attribution**: a method inside a class is tagged with `parent_class`, so retrieval can distinguish `Context.call_on_close` from an unrelated top-level `call_on_close` elsewhere
+- **Exact line ranges** (`start_line`, `end_line`) are captured per chunk, which is what lets later stages cite "this is handled in `core.py`, lines 45–60" instead of a vague file-level pointer
+- Each chunk gets a stable `chunk_id` (a short hash of file path + line + symbol name), so re-parsing the same file twice produces consistent IDs — useful later for incremental re-indexing without duplicating rows
+
+**Tested against a real repo, not a toy example:** [`pallets/click`](https://github.com/pallets/click) (a well-known, moderately sized Python CLI library — 31 files). Parsing it end-to-end produced:
+
+| Chunk type | Count |
+|---|---|
+| functions | 749 |
+| methods | 402 |
+| classes | 117 |
+| **total** | **1,268** |
+
+Spot-checking individual chunks (e.g. `Context.call_on_close` in
+`src/click/core.py`) confirmed correct docstring extraction, accurate line
+ranges, and correct parent-class attribution — no manual correction needed.
+
+**Design decisions worth calling out:**
+- Nested functions (a function defined inside another function) are *not* recursed into as separate chunks — they stay embedded in their parent's `source`, since a nested helper rarely makes sense as a standalone retrieval unit divorced from the function that uses it
+- Currently Python-only (`function_definition` / `class_definition` node types are language-specific in tree-sitter); the `LANGUAGE_CONFIG` dict in `parser.py` is structured so adding JS/TS/Go support later is a matter of adding new node-type mappings, not rewriting the walker
 
 ## Setup
 
