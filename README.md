@@ -14,10 +14,11 @@ doesn't have access to.
 
 **Stack:** tree-sitter · Vertex AI embeddings · pgvector · Gemini · FastAPI
 
-## Status: Day 2 complete — embeddings + vector retrieval verified
+## Status: Day 3 complete — hybrid search + reranking, measured improvement over Day 2 baseline
 
 - ✅ Day 1: AST-aware chunking (tree-sitter) — 1,268 chunks from `pallets/click`
 - ✅ Day 2: embeddings (Vertex AI `text-embedding-004`) + storage (Supabase/pgvector), retrieval sanity-checked
+- ✅ Day 3: hybrid search (vector + full-text, fused via RRF) + cross-encoder reranking — confirmed to fix the implementation-vs-test confusion found in Day 2
 
 ## Day 1: AST-aware chunking
 
@@ -58,7 +59,7 @@ ranges, and correct parent-class attribution — no manual correction needed.
 ## Setup
 
 ```bash
-pip install tree-sitter==0.21.3 tree-sitter-languages google-cloud-aiplatform psycopg2-binary python-dotenv --break-system-packages
+pip install -r requirements.txt
 ```
 
 (Note: pin `tree-sitter` to 0.21.3 — newer versions break the API that
@@ -85,6 +86,12 @@ python3 ingestion/embed.py chunks.jsonl
 
 # 4. sanity-check retrieval with a real query
 python3 ingestion/test_retrieval.py "how does click parse command line arguments"
+
+# 5. add full-text search support (one-time migration)
+python3 ingestion/add_fulltext_search.py
+
+# 6. hybrid search + reranking — compares against vector-only baseline
+python3 ingestion/hybrid_search.py "how does click parse command line arguments"
 ```
 
 `chunks.jsonl` contains one JSON object per function/class/method:
@@ -99,20 +106,40 @@ Each chunk is embedded as a combination of symbol info + docstring + source
 (not just raw code), so a query in plain English can match on intent even
 when the code itself uses different terminology.
 
-## Known limitation (motivates Day 3)
+## Day 3: hybrid search + cross-encoder reranking
 
-Pure semantic (embeddings-only) search doesn't reliably distinguish
-*implementation* from *tests* — a query like "how does click parse command
-line arguments" surfaces the correct function (`parse_args` in
-`_OptionParser`) but also several `test_*` functions that merely discuss the
-same concepts. Hybrid search (vector + keyword/BM25) and cross-encoder
-reranking should sharpen this.
+Day 2's retrieval worked, but had a real limitation: pure vector similarity
+doesn't distinguish *code that implements something* from *code that merely
+talks about the same concept* — a test function asserting behaviour of a
+parser scores nearly as high as the parser itself, since both use similar
+language.
 
-## Next steps (Day 3+)
+Day 3 addresses this with a three-stage pipeline:
 
-- Hybrid retrieval: pgvector cosine similarity + Postgres full-text search (BM25-ish), to fix the implementation-vs-test confusion above
-- Cross-encoder reranking on top-k candidates
-- Gemini generation with file/line citations
-- Eval harness: precision@k, faithfulness, hybrid vs. embeddings-only baseline (quantify the improvement above)
+1. **Vector search** (same as Day 2) — top 20 candidates by cosine similarity
+2. **Full-text search** — a Postgres `tsvector` column (`ingestion/add_fulltext_search.py`) indexed with GIN, weighted so a match on `symbol_name` counts more than a match buried in `source`. This catches exact-term matches (e.g. someone searching for `parse_args` by name) that embeddings alone can miss or under-rank.
+3. **Reciprocal Rank Fusion (RRF)** — merges the two ranked lists without needing to hand-tune relative weights: a chunk's fused score is the sum of `1/(k + rank)` across every list it appears in, so anything ranking well in *either* list (or both) rises to the top.
+4. **Cross-encoder reranking** (`cross-encoder/ms-marco-MiniLM-L-6-v2`) — the fused top 10 are rescored by a cross-encoder, which reads the query and each candidate together (rather than comparing two independent vectors), giving a much more accurate relevance judgment. This is too slow to run over the whole table, which is why it only reranks a short fused list.
+
+### Measured result
+
+Same query, same underlying data, before and after — run yourself with `python3 ingestion/hybrid_search.py "how does click parse command line arguments"`:
+
+| Rank | Day 2 (vector only) | Day 3 (hybrid + reranked) |
+|---|---|---|
+| 1 | ❌ `test_nargs_envvar` (test) | ✅ `parse_args` (`_OptionParser`) |
+| 2 | ✅ `parse_args` (`_OptionParser`) | ✅ `Command` (class) |
+| 3 | ❌ `test_command_to_info_dict_multiple_arguments` (test) | ✅ `_OptionParser` (class) |
+| 4 | ✅ `__init__` (`_OptionParser`) | ✅ `main` (`Command`) |
+| 5 | ❌ `test_unprocessed_options` (test) | ✅ `__init__` (`_OptionParser`) |
+
+Day 2's top 5 had 3 test functions crowding out real implementation, and the
+correct answer (`parse_args`) only placed 2nd. Day 3's top 5 is **100% real
+implementation, zero tests**, with `parse_args` correctly placed 1st.
+
+## Next steps (Day 4+)
+
+- Eval harness: build a labeled query set (20–50 questions) and measure precision@k / faithfulness formally, rather than eyeballing single queries like the comparison above
+- Gemini generation on top of retrieval, with file/line citations in the answer
 - Call-graph awareness, multi-hop query decomposition
 - Frontend: Monaco code viewer + retrieval trace visualization
