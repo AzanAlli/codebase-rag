@@ -14,11 +14,12 @@ doesn't have access to.
 
 **Stack:** tree-sitter · Vertex AI embeddings · pgvector · Gemini · FastAPI
 
-## Status: Day 3 complete — hybrid search + reranking, measured improvement over Day 2 baseline
+## Status: Day 4 complete — generation + API layer, with a working faithfulness check
 
 - ✅ Day 1: AST-aware chunking (tree-sitter) — 1,268 chunks from `pallets/click`
 - ✅ Day 2: embeddings (Vertex AI `text-embedding-004`) + storage (Supabase/pgvector), retrieval sanity-checked
 - ✅ Day 3: hybrid search (vector + full-text, fused via RRF) + cross-encoder reranking — confirmed to fix the implementation-vs-test confusion found in Day 2
+- ✅ Day 4: Gemini generation with file/line citations, wrapped in a FastAPI `/query` endpoint, with an automated faithfulness check
 
 ## Day 1: AST-aware chunking
 
@@ -92,6 +93,13 @@ python3 ingestion/add_fulltext_search.py
 
 # 6. hybrid search + reranking — compares against vector-only baseline
 python3 ingestion/hybrid_search.py "how does click parse command line arguments"
+
+# 7. run the full API (retrieval + generation + faithfulness check)
+uvicorn api.main:app --reload
+# in another terminal:
+curl -X POST http://localhost:8000/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "how does click parse command line arguments"}'
 ```
 
 `chunks.jsonl` contains one JSON object per function/class/method:
@@ -137,9 +145,28 @@ Day 2's top 5 had 3 test functions crowding out real implementation, and the
 correct answer (`parse_args`) only placed 2nd. Day 3's top 5 is **100% real
 implementation, zero tests**, with `parse_args` correctly placed 1st.
 
-## Next steps (Day 4+)
+## Day 4: generation + API
 
-- Eval harness: build a labeled query set (20–50 questions) and measure precision@k / faithfulness formally, rather than eyeballing single queries like the comparison above
-- Gemini generation on top of retrieval, with file/line citations in the answer
+Retrieval alone isn't a usable tool — Day 4 wires the retrieved chunks into
+a Gemini prompt that answers the user's question, with a citation after
+every claim in `(file_path:start_line-end_line)` format, then wraps the
+whole pipeline in a FastAPI endpoint.
+
+**Architecture:**
+- `core/retrieval.py` — the Day 3 hybrid search pipeline, extracted into a shared module (previously duplicated between the CLI script and what would've become the API)
+- `core/generation.py` — builds a grounded prompt from retrieved chunks, calls Gemini (via the current `google-genai` SDK — the older `vertexai.generative_models` module is on Google's deprecation path), and checks the answer's faithfulness
+- `api/main.py` — a FastAPI app exposing `POST /query`, returning the answer, the source chunks used, and the faithfulness report
+
+**Faithfulness check:** rather than just trusting Gemini's citations, we parse every `(file:start-end)` citation out of the generated answer and verify it falls *inside* the line range of a chunk that was actually retrieved. A citation pointing somewhere outside every retrieved chunk would indicate hallucination — the model citing a location it wasn't actually given.
+
+**A real bug found and fixed during testing:** the first version of the citation-extraction regex assumed each parenthetical contained exactly one citation, e.g. `(file.py:12-34)`. Gemini often lists several citations in one parenthetical instead, e.g. `(a.py:12-34, b.py:56-78)` — which silently failed to match at all under the old regex, since it required a `)` immediately after the first citation. This meant real, valid citations were being dropped and wrongly reported as failures. Fixed by matching the citation pattern directly rather than anchoring on the surrounding parentheses. Worth calling out as an example of why testing the full pipeline against a real query (not just unit-testing each piece in isolation) caught a bug that would otherwise have quietly under-reported faithfulness.
+
+**Example**, run via `curl -X POST http://localhost:8000/query -d '{"question": "how does click parse command line arguments"}'`: Gemini correctly traced the real call flow — `Command.main` → `make_context` → `Command.parse_args` → `_OptionParser.parse_args` — citing exact line ranges for each step, all of which checked out as grounded in the retrieved chunks (`is_faithful: true`).
+
+**Known limitation:** the faithfulness check only recognizes citations in `file:start-end` range format; Gemini occasionally cites a single line number instead (e.g. `file.py:1479`), which the current regex doesn't parse. Rare in practice, but worth tightening the prompt or the regex if it comes up often in the eval harness.
+
+
+
+- Eval harness: build a labeled query set (20–50 questions) and measure precision@k / faithfulness across all of them, not just the one query walked through above
 - Call-graph awareness, multi-hop query decomposition
 - Frontend: Monaco code viewer + retrieval trace visualization
