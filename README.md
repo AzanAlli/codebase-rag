@@ -165,7 +165,15 @@ whole pipeline in a FastAPI endpoint.
 
 **Known limitation:** the faithfulness check only recognizes citations in `file:start-end` range format; Gemini occasionally cites a single line number instead (e.g. `file.py:1479`), which the current regex doesn't parse. Rare in practice, but worth tightening the prompt or the regex if it comes up often in the eval harness.
 
+**Follow-up fix — closing the test-vs-implementation gap for real:** testing the CLI against a second query ("how does click format help text") showed the Day 3 hybrid+rerank pipeline *reduces* but doesn't eliminate test functions leaking into results — `test_help_formatter_write_text` and `test_context_formatter_class` still ranked #2 and #3, since a test that directly calls and asserts on a function is genuinely close in both meaning and wording to the function itself. No amount of ranking tuning fully separates two things that really are about the same code.
 
+Since `file_path` already unambiguously identifies test code (anything under `tests/`), the fix is to filter explicitly rather than rely on semantic ranking to sort it out: `core/retrieval.py` now excludes `tests/` chunks from both vector and full-text search **by default**, with an automatic override — if the query itself mentions "test" or "testing", test files are included instead, since that's clearly what the user wants in that case.
+
+Re-running the same query after the fix: all 5 sources are now real implementation, zero test functions (`format_help_text`, `make_formatter`, `format_help`, `Command`, `make_default_short_help`), and the answer remained fully faithful.
+
+Also added: `cli.py`, an interactive/single-query command-line demo that calls the pipeline directly — no server or curl needed — closing out the original "minimal frontend or CLI for demo purposes" scope for this phase.
+
+## Next steps (Day 5+)
 
 - Eval harness: build a labeled query set (20–50 questions) and measure precision@k / faithfulness across all of them, not just the one query walked through above
 - Call-graph awareness, multi-hop query decomposition
