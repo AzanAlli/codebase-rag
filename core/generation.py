@@ -71,6 +71,22 @@ def extract_citations(answer: str) -> list[str]:
     return re.findall(r"[\w./\\-]+\.py:\d+-\d+", answer)
 
 
+def _files_match(citation_file: str, chunk_file: str) -> bool:
+    """
+    True if citation_file plausibly refers to chunk_file. Gemini often
+    shortens repeat citations within the same answer — giving the full
+    path once (e.g. "src/click/core.py:1132-1141") and then just the
+    basename for a follow-up claim about the same file
+    ("core.py:1136-1139"). An exact string match would wrongly flag the
+    second one as hallucinated, when it's really the same file. We accept
+    a match if the paths are identical, or if one path ends with the
+    other (handles the shortened-basename case in either direction).
+    """
+    if citation_file == chunk_file:
+        return True
+    return chunk_file.endswith(citation_file) or citation_file.endswith(chunk_file)
+
+
 def check_faithfulness(answer: str, chunks: list[dict]) -> dict:
     """
     Lightweight faithfulness check: every citation in the answer should
@@ -86,7 +102,7 @@ def check_faithfulness(answer: str, chunks: list[dict]) -> dict:
         file_path, line_range = citation.rsplit(":", 1)
         cite_start, cite_end = (int(x) for x in line_range.split("-"))
         for c in chunks:
-            if c["file_path"] != file_path:
+            if not _files_match(file_path, c["file_path"]):
                 continue
             if c["start_line"] <= cite_start and cite_end <= c["end_line"]:
                 return True

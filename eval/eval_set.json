@@ -1,0 +1,122 @@
+[
+  {
+    "query": "How do I get all the components that make up a usage line, returned as a list of strings?",
+    "expected_chunk_id": "0f3b17eb59eb0764",
+    "expected_symbol_name": "collect_usage_pieces",
+    "expected_file_path": "src/click/core.py"
+  },
+  {
+    "query": "How do I generate and format auto-completion data to send to the shell?",
+    "expected_chunk_id": "d3abd49706ea20ce",
+    "expected_symbol_name": "complete",
+    "expected_file_path": "src/click/shell_completion.py"
+  },
+  {
+    "query": "How to add a function that processes the return value and input parameters of a command?",
+    "expected_chunk_id": "30fc1830d7d98813",
+    "expected_symbol_name": "result_callback",
+    "expected_file_path": "src/click/core.py"
+  },
+  {
+    "query": "How to calculate a clamped value against a boundary, considering movement direction and open range?",
+    "expected_chunk_id": "7c6ec8961d2483c0",
+    "expected_symbol_name": "_clamp",
+    "expected_file_path": "src/click/types.py"
+  },
+  {
+    "query": "What class can I use to restrict a value to a fixed, predefined set of options, optionally allowing for case-insensitive matching?",
+    "expected_chunk_id": "ca00cdebb82371bd",
+    "expected_symbol_name": "Choice",
+    "expected_file_path": "src/click/types.py"
+  },
+  {
+    "query": "How to generate a string from a parameter for error messages to indicate the faulty parameter?",
+    "expected_chunk_id": "c03cb10ce3d9b7b1",
+    "expected_symbol_name": "get_error_hint",
+    "expected_file_path": "src/click/core.py"
+  },
+  {
+    "query": "How to process user input from a parser, apply the parameter's type, and warn if a deprecated parameter was explicitly provided?",
+    "expected_chunk_id": "6e5c99b826449055",
+    "expected_symbol_name": "handle_parse_result",
+    "expected_file_path": "src/click/core.py"
+  },
+  {
+    "query": "How can I get user input from the terminal with features like default values, hidden input for sensitive data, and confirmation steps?",
+    "expected_chunk_id": "a4b937131a47d541",
+    "expected_symbol_name": "prompt",
+    "expected_file_path": "src/click/termui.py"
+  },
+  {
+    "query": "How do I format options and commands into a two-column list with configurable width and spacing?",
+    "expected_chunk_id": "9cd64676c7a149bb",
+    "expected_symbol_name": "write_dl",
+    "expected_file_path": "src/click/formatting.py"
+  },
+  {
+    "query": "How to concatenate content from files or standard input and write it to a file or standard output?",
+    "expected_chunk_id": "8e20fd990ee1b4c2",
+    "expected_symbol_name": "cli",
+    "expected_file_path": "examples/inout/inout.py"
+  },
+  {
+    "query": "How to automatically inject a specific contextual value as the initial argument for a Python function?",
+    "expected_chunk_id": "3d4384e41052c315",
+    "expected_symbol_name": "pass_meta_key",
+    "expected_file_path": "src/click/decorators.py"
+  },
+  {
+    "query": "How do I generate a shell script that defines a completion function?",
+    "expected_chunk_id": "65b52167f424dd77",
+    "expected_symbol_name": "source",
+    "expected_file_path": "src/click/shell_completion.py"
+  },
+  {
+    "query": "What exception indicates that an option was supplied but used incorrectly?",
+    "expected_chunk_id": "0f15e32a9917cdfc",
+    "expected_symbol_name": "BadOptionUsage",
+    "expected_file_path": "src/click/exceptions.py"
+  },
+  {
+    "query": "What creates the object for formatting help and usage messages?",
+    "expected_chunk_id": "f7d8550fa5ac1cf5",
+    "expected_symbol_name": "make_formatter",
+    "expected_file_path": "src/click/core.py"
+  },
+  {
+    "query": "How to convert a string to a boolean, returning the original value if it's already a boolean, and None if the string doesn't match a known boolean state?",
+    "expected_chunk_id": "8dc10af5a93e6e92",
+    "expected_symbol_name": "str_to_bool",
+    "expected_file_path": "src/click/types.py"
+  },
+  {
+    "query": "How to get the value of an environment variable, or the first non-empty one from a list of variables, returning nothing if not set or empty?",
+    "expected_chunk_id": "e8de83df85daa2f4",
+    "expected_symbol_name": "resolve_envvar_value",
+    "expected_file_path": "src/click/core.py"
+  },
+  {
+    "query": "How to obtain the operating system file descriptor for a stream that was originally saved, particularly when the system is running in a mode that directly uses file descriptors?",
+    "expected_chunk_id": "abe7287d486dda83",
+    "expected_symbol_name": "fileno",
+    "expected_file_path": "src/click/testing.py"
+  },
+  {
+    "query": "How to find the appropriate configuration directory for an application across different operating systems?",
+    "expected_chunk_id": "b0d4b333f726ed21",
+    "expected_symbol_name": "get_app_dir",
+    "expected_file_path": "src/click/utils.py"
+  },
+  {
+    "query": "How to process an environment variable string, returning it as-is or splitting it into a sequence if a parameter expects multiple values?",
+    "expected_chunk_id": "7dc3f03bb5960286",
+    "expected_symbol_name": "value_from_envvar",
+    "expected_file_path": "src/click/core.py"
+  },
+  {
+    "query": "What is the internal utility for parsing command-line options and arguments with a simplified optparse-like interface?",
+    "expected_chunk_id": "00ed7745e2257419",
+    "expected_symbol_name": "_OptionParser",
+    "expected_file_path": "src/click/parser.py"
+  }
+]
