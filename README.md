@@ -14,12 +14,13 @@ doesn't have access to.
 
 **Stack:** tree-sitter · Vertex AI embeddings · pgvector · Gemini · FastAPI
 
-## Status: Day 4 complete — generation + API layer, with a working faithfulness check
+## Status: Day 5 complete — measured eval harness, 100% faithfulness across 20 real questions
 
 - ✅ Day 1: AST-aware chunking (tree-sitter) — 1,268 chunks from `pallets/click`
 - ✅ Day 2: embeddings (Vertex AI `text-embedding-004`) + storage (Supabase/pgvector), retrieval sanity-checked
 - ✅ Day 3: hybrid search (vector + full-text, fused via RRF) + cross-encoder reranking — confirmed to fix the implementation-vs-test confusion found in Day 2
 - ✅ Day 4: Gemini generation with file/line citations, wrapped in a FastAPI `/query` endpoint, with an automated faithfulness check
+- ✅ Day 5: synthetic eval harness — 20 real questions, hybrid pipeline beats vector-only baseline on hit_rate@1 and MRR, 100% generation faithfulness after fixing two real bugs surfaced by testing at scale
 
 ## Day 1: AST-aware chunking
 
@@ -100,6 +101,14 @@ uvicorn api.main:app --reload
 curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
   -d '{"question": "how does click parse command line arguments"}'
+
+# 8. or use the CLI (no server needed)
+python3 cli.py
+python3 cli.py "how does click parse command line arguments"
+
+# 9. eval harness: generate a synthetic query set, then score both pipelines
+python3 eval/generate_eval_set.py --n 20
+python3 eval/run_eval.py
 ```
 
 `chunks.jsonl` contains one JSON object per function/class/method:
@@ -173,8 +182,49 @@ Re-running the same query after the fix: all 5 sources are now real implementati
 
 Also added: `cli.py`, an interactive/single-query command-line demo that calls the pipeline directly — no server or curl needed — closing out the original "minimal frontend or CLI for demo purposes" scope for this phase.
 
-## Next steps (Day 5+)
+## Day 5: eval harness
 
-- Eval harness: build a labeled query set (20–50 questions) and measure precision@k / faithfulness across all of them, not just the one query walked through above
+Everything up to Day 4 was validated on one or two example queries — useful
+for finding bugs, but not a real measurement. Day 5 builds a proper eval
+set and scores both retrieval and generation across it.
+
+**Building the eval set without hand-labeled guesses:** rather than me
+writing "ground truth" questions from memory of what I think `click`'s
+internals do (risky — I could just be wrong about a codebase I didn't
+write), `eval/generate_eval_set.py` samples real chunks from the database
+and asks Gemini to write a natural-language question that chunk answers,
+without naming the function directly. This produces `{query,
+expected_chunk_id}` pairs that are grounded in the actual indexed code,
+not my assumptions about it.
+
+**Metrics:**
+- **Retrieval**: hit rate @ k (1, 3, 5, 10) and Mean Reciprocal Rank (MRR), comparing the Day 2 vector-only baseline against the full Day 3/4 hybrid+rerank+test-filter pipeline
+- **Generation**: faithfulness rate — the fraction of generated answers where every citation is grounded in a chunk that was actually retrieved
+
+### Results (20 real questions against `pallets/click`)
+
+| Metric | Baseline (vector only) | Hybrid + rerank + filter |
+|---|---|---|
+| hit_rate@1 | 0.750 | **0.850** ↑ |
+| hit_rate@3 | 0.950 | 0.950 |
+| hit_rate@5 | 0.950 | **1.000** ↑ |
+| hit_rate@10 | 1.000 | 1.000 |
+| MRR | 0.850 | **0.904** ↑ |
+
+**Faithfulness: 20/20 (100%)** — every generated answer's citations were grounded in the retrieved context, no hallucinated locations.
+
+### Two more real bugs found and fixed while building this
+
+Running the eval against a real, larger query set (rather than one or two
+hand-picked examples) surfaced two genuine bugs in the faithfulness
+checker — a good example of why an eval harness earns its keep beyond just
+producing a headline number:
+
+1. **Module import path bug**: `eval/run_eval.py` initially failed with `ModuleNotFoundError: No module named 'core'` when run as `python3 eval/run_eval.py` from the project root, since Python only adds the *script's own directory* to the import path, not the project root. Fixed by inserting the project root into `sys.path` at the top of the script (the same fix already used in `api/main.py`).
+
+2. **File path truncation in repeat citations**: the first real eval run showed faithfulness collapse to 50%, then 20% on a second run — and critically, the *same* questions flipped between faithful/unfaithful across runs, which is a strong signal of a checker bug rather than genuine hallucination (real hallucination on unchanged context wouldn't flip like that). Inspecting the raw citation data (`eval/inspect_faithfulness.py`) showed the pattern clearly: Gemini often cites a file's full path once (`src/click/core.py:1132-1141`) and then shortens it to just the basename for a follow-up claim about the same file (`core.py:1136-1139`). The faithfulness checker required an *exact* string match on `file_path`, so the shortened citation never matched, even though it was the same file and a valid sub-range. Fixed by matching on path suffix/basename (`core/generation.py`'s `_files_match`) instead of exact equality — confirmed with a standalone test before shipping it, then reran the full eval set to verify: faithfulness went from 20% → 100% with zero other changes.
+
+## Next steps (Day 6+)
+
 - Call-graph awareness, multi-hop query decomposition
-- Frontend: Monaco code viewer + retrieval trace visualization
+- Frontend: repo picker + Monaco code viewer + retrieval trace visualization — turning this from a script into something a non-technical person could actually click through

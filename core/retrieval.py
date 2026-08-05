@@ -131,6 +131,24 @@ def cross_encoder_rerank(query: str, chunks: list[dict], top_k: int) -> list[tup
     return scored[:top_k]
 
 
+def vector_only_search(query: str, top_k: int = 10, exclude_tests: bool | None = None) -> list[dict]:
+    """
+    Baseline retrieval: vector similarity only, no full-text fusion, no
+    reranking. Exists so the eval harness can measure how much hybrid
+    search + reranking actually improves things, rather than assuming it.
+    """
+    if exclude_tests is None:
+        exclude_tests = not query_mentions_tests(query)
+
+    query_embedding = embed_query(query)
+    conn = _get_connection()
+    cur = conn.cursor()
+    results = vector_search(cur, query_embedding, top_k, exclude_tests=exclude_tests)
+    cur.close()
+    conn.close()
+    return results
+
+
 def hybrid_search(query: str, top_k: int = 5, exclude_tests: bool | None = None) -> list[tuple[dict, float]]:
     """
     Full pipeline: embed query, run vector + full-text search, fuse via RRF,
@@ -156,3 +174,100 @@ def hybrid_search(query: str, top_k: int = 5, exclude_tests: bool | None = None)
     fused = reciprocal_rank_fusion(vector_results, fulltext_results)
     shortlist = fused[:RERANK_TOP_N]
     return cross_encoder_rerank(query, shortlist, top_k)
+
+
+def expand_with_call_graph(chunks: list[dict], max_extra: int = 3) -> list[dict]:
+    """
+    Given a list of already-retrieved chunks (best first), pull in their
+    immediate callers and callees from the call graph (built by
+    ingestion/build_call_graph.py) and append up to max_extra new chunks
+    that weren't already retrieved.
+
+    Iterates the input chunks in their existing rank order, so graph
+    context near the MOST relevant chunk is preferred over context near a
+    lower-ranked one. Each added chunk is tagged with
+    'expansion_source_symbol' so callers (e.g. a retrieval-trace UI) can
+    show *why* it was included, rather than presenting it as if it had
+    been retrieved the normal way.
+
+    Note: this is a straightforward, unoptimized loop of small queries
+    rather than one batched query — fine at this project's scale (a
+    handful of chunks, a handful of edges each), but worth batching if
+    this were ever running against a much larger call graph.
+    """
+    if not chunks:
+        return chunks
+
+    seen_ids = {c["id"] for c in chunks}
+    conn = _get_connection()
+    cur = conn.cursor()
+    extra: list[dict] = []
+
+    for chunk in chunks:
+        if len(extra) >= max_extra:
+            break
+
+        cur.execute(
+            "SELECT DISTINCT callee_id FROM call_edges WHERE caller_id = %s AND callee_id IS NOT NULL;",
+            (chunk["id"],),
+        )
+        callee_ids = [row[0] for row in cur.fetchall()]
+
+        cur.execute(
+            "SELECT DISTINCT caller_id FROM call_edges WHERE callee_id = %s;",
+            (chunk["id"],),
+        )
+        caller_ids = [row[0] for row in cur.fetchall()]
+
+        for candidate_id in callee_ids + caller_ids:
+            if len(extra) >= max_extra:
+                break
+            if candidate_id in seen_ids:
+                continue
+            seen_ids.add(candidate_id)
+
+            cur.execute(
+                """
+                SELECT id, file_path, symbol_name, symbol_type, parent_class,
+                       start_line, end_line, docstring, source
+                FROM code_chunks WHERE id = %s;
+                """,
+                (candidate_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                continue
+            columns = [desc[0] for desc in cur.description]
+            extra_chunk = dict(zip(columns, row))
+            extra_chunk["expansion_source_symbol"] = chunk["symbol_name"]
+            extra.append(extra_chunk)
+
+    cur.close()
+    conn.close()
+    return chunks + extra
+
+
+def multi_hop_search(query: str, top_k: int = 5, exclude_tests: bool | None = None) -> list[tuple[dict, float]]:
+    """
+    Decompose a compound question into sub-questions (core/decomposition.py),
+    run hybrid_search independently for each, then merge the results —
+    deduping by chunk id and keeping each chunk's best score across all
+    sub-questions it matched. For a simple, non-compound question,
+    decompose_query returns just the original question, so this behaves
+    identically to a single hybrid_search call (just with one extra
+    classification call up front).
+    """
+    from core.decomposition import decompose_query  # local import avoids a circular import at module load time
+
+    sub_questions = decompose_query(query)
+
+    merged: dict[str, tuple[dict, float]] = {}
+    for sub_q in sub_questions:
+        results = hybrid_search(sub_q, top_k=top_k, exclude_tests=exclude_tests)
+        for chunk, score in results:
+            cid = chunk["id"]
+            if cid not in merged or score > merged[cid][1]:
+                merged[cid] = (chunk, score)
+
+    ranked = sorted(merged.values(), key=lambda pair: pair[1], reverse=True)
+    return ranked[:top_k], sub_questions
