@@ -14,13 +14,15 @@ doesn't have access to.
 
 **Stack:** tree-sitter · Vertex AI embeddings · pgvector · Gemini · FastAPI
 
-## Status: Day 5 complete — measured eval harness, 100% faithfulness across 20 real questions
+## Status: Day 7 complete — multi-hop query decomposition + closed a known citation gap
 
 - ✅ Day 1: AST-aware chunking (tree-sitter) — 1,268 chunks from `pallets/click`
 - ✅ Day 2: embeddings (Vertex AI `text-embedding-004`) + storage (Supabase/pgvector), retrieval sanity-checked
 - ✅ Day 3: hybrid search (vector + full-text, fused via RRF) + cross-encoder reranking — confirmed to fix the implementation-vs-test confusion found in Day 2
 - ✅ Day 4: Gemini generation with file/line citations, wrapped in a FastAPI `/query` endpoint, with an automated faithfulness check
 - ✅ Day 5: synthetic eval harness — 20 real questions, hybrid pipeline beats vector-only baseline on hit_rate@1 and MRR, 100% generation faithfulness after fixing two real bugs surfaced by testing at scale
+- ✅ Day 6: name-based call graph (surfaces caller/callee context automatically) + audience-aware routing (plain-language answers for non-technical questions, e.g. from a recruiter, instead of forcing code citations onto every answer)
+- ✅ Day 7: multi-hop query decomposition for compound questions, plus closed a known citation-parsing gap (single-line citations) — re-verified against the full eval set with zero regression
 
 ## Day 1: AST-aware chunking
 
@@ -109,6 +111,17 @@ python3 cli.py "how does click parse command line arguments"
 # 9. eval harness: generate a synthetic query set, then score both pipelines
 python3 eval/generate_eval_set.py --n 20
 python3 eval/run_eval.py
+
+# 10. build the call graph (name-based caller/callee relationships)
+python3 ingestion/build_call_graph.py
+python3 cli.py --graph "how does click parse command line arguments"
+
+# 11. generate a plain-language project summary, for non-technical questions
+python3 ingestion/generate_project_summary.py test_repos/click
+python3 cli.py "what does this project do"
+
+# 12. multi-hop: compound questions get decomposed and merged automatically
+python3 cli.py --multihop "how does click parse arguments and how does it format help text"
 ```
 
 `chunks.jsonl` contains one JSON object per function/class/method:
@@ -224,7 +237,116 @@ producing a headline number:
 
 2. **File path truncation in repeat citations**: the first real eval run showed faithfulness collapse to 50%, then 20% on a second run — and critically, the *same* questions flipped between faithful/unfaithful across runs, which is a strong signal of a checker bug rather than genuine hallucination (real hallucination on unchanged context wouldn't flip like that). Inspecting the raw citation data (`eval/inspect_faithfulness.py`) showed the pattern clearly: Gemini often cites a file's full path once (`src/click/core.py:1132-1141`) and then shortens it to just the basename for a follow-up claim about the same file (`core.py:1136-1139`). The faithfulness checker required an *exact* string match on `file_path`, so the shortened citation never matched, even though it was the same file and a valid sub-range. Fixed by matching on path suffix/basename (`core/generation.py`'s `_files_match`) instead of exact equality — confirmed with a standalone test before shipping it, then reran the full eval set to verify: faithfulness went from 20% → 100% with zero other changes.
 
-## Next steps (Day 6+)
+## Day 6: call-graph awareness + audience-aware routing
 
-- Call-graph awareness, multi-hop query decomposition
+### Call-graph awareness
+
+Retrieval so far treats every chunk independently — it has no notion that
+`Command.main` calls `parse_args`, which calls `_process_args_for_options`.
+For questions that trace a multi-step process, the retriever has to get
+lucky and rank every step highly on its own.
+
+`ingestion/build_call_graph.py` builds a lightweight, **name-based**
+call graph (not full semantic analysis — worth stating clearly): for each
+function/method chunk, it walks the AST for `call` expressions and matches
+the called name against known symbols in the same repo. Run against
+`pallets/click`: **7,917 of 9,487 extracted calls (83%) resolved** to a
+known chunk in the repo, the rest being external/builtin calls (`len()`,
+`isinstance()`, etc.) that a name-based approach can't and shouldn't try to
+resolve.
+
+`core/retrieval.py`'s `expand_with_call_graph()` uses this: given the
+top-ranked retrieved chunks, it pulls in their immediate callers/callees
+(up to a small cap) and tags each with which chunk it's related to, so a
+retrieval-trace UI (or just this README) can show *why* it was included.
+
+**Measured effect**, same query as throughout this README
+(`python3 cli.py --graph "how does click parse command line arguments"`):
+without call-graph expansion, the answer described the high-level flow but
+stopped at "processes options, then positional arguments" — with
+expansion, the two helper methods that actually implement each step
+(`_process_args_for_options`, `_process_args_for_args`) got pulled in
+automatically and the answer became substantively more detailed and
+accurate, still 100% faithful. The retriever didn't need to get lucky
+ranking those helpers on their own; the graph surfaced them because they
+were structurally connected to what was already found relevant.
+
+**A real bug caught before shipping**: the first version of `call_edges`
+used `(caller_id, callee_name)` as a primary key, which silently collapsed
+ambiguous call targets (e.g. a common method name like `__init__` defined
+in dozens of classes) down to whichever match got written last — losing
+roughly half the extracted edges (9,487 extracted, only 4,078 stored).
+Fixed by switching to a surrogate key, since multiple callees for one
+ambiguous name are a legitimate result, not a duplicate to be
+deduplicated away.
+
+### Audience-aware routing
+
+Not every question about this project is technical. A recruiter or
+non-engineering interviewer asking "what does this do?" would previously
+get either nothing relevant (no code chunk answers that) or a confusing,
+citation-heavy technical answer — neither is useful to them.
+
+Rather than building a bigger system (an LLM-based router, multiple
+specialized retrieval indexes, conversation memory) to solve this, the
+actual problem only needed two small, cheap additions:
+
+- **`ingestion/generate_project_summary.py`**: a one-time script that reads the repo's README and asks Gemini to write a plain-English, jargon-free summary (what it is, what problem it solves, who it's for), stored for reuse
+- **`core/conceptual.py`**: a regex-based classifier (`is_conceptual_query`) — deliberately a heuristic, not an LLM call, so it's free, instant, and predictable — that recognizes patterns like "what does this project do" or "why would a company use this" and routes them to a plain-language answer generated from the stored summary, skipping code retrieval and citations entirely
+
+**Why not the bigger version:** a fuller "multi-agent routing" architecture (an LLM deciding how to route, separate specialized indexes, session memory) was considered and deliberately not built. At this project's actual scale — a single-user portfolio demo, not a live product with real traffic — the extra architecture adds real failure modes (a misrouted query, a garbled multi-agent synthesis) for a result a user can't actually tell apart from the simpler version. It would also cost measurably more per query if this became a real subscription product later (each routing/synthesis step is an extra LLM call, which is a recurring cost multiplied by every user interaction, not a one-time cost) — premature architecture here would be optimizing for scale the project doesn't have yet, at the expense of reliability it needs right now.
+
+**Tested against three real queries:**
+- *"what does this project do"* → routed to conceptual, plain language, zero jargon, zero citations
+- *"why would a company use this"* → routed to conceptual, and the answer adapted its framing to the specific business-value angle of the question rather than repeating a canned summary verbatim
+- *"how does click parse command line arguments"* → correctly stayed on the full technical pipeline, unchanged, still faithful — confirming the new routing doesn't interfere with real technical questions
+
+## Day 7: multi-hop query decomposition
+
+A compound question — "how does click parse arguments and how does it
+format help text" — asks about two genuinely distinct parts of the
+codebase. A single embedding of the whole sentence tends to blur both
+topics together rather than finding good matches for each.
+
+`core/decomposition.py` uses one Gemini call to decide whether a question
+needs splitting, and if so, breaks it into 2-3 focused sub-questions.
+`core/retrieval.py`'s `multi_hop_search()` runs `hybrid_search`
+independently for each sub-question, then merges results — deduping by
+chunk id, keeping each chunk's best score across every sub-question it
+matched.
+
+**Graceful degradation, verified not just claimed**: for a simple,
+non-compound question, decomposition just returns the original question
+unchanged, so the search runs exactly once, same as normal. Ran the same
+simple query (`"how does click parse command line arguments"`) through
+both `hybrid_search` directly and `multi_hop_search` — the source
+rankings and relevance scores were byte-identical, confirming the
+decomposition step adds zero behavior change for questions that don't
+need it (just one extra classification call).
+
+**Tested against a real compound query**
+(`python3 cli.py --multihop "how does click parse arguments and how does it format help text"`):
+correctly split into "how does click parse arguments" and "how does click
+format help text", and the merged sources drew from **both** areas
+(`_OptionParser`/`parse_args` for parsing, `format_help_text`/
+`make_formatter` for help formatting) — a balance a single non-decomposed
+search likely wouldn't have found, since the two topics compete for
+representation in one embedding.
+
+**A citation-parsing gap closed while testing this**: the multi-hop run
+above surfaced a case documented back in Day 4 as a known limitation —
+Gemini occasionally cites a single line (`core.py:1483`) instead of a
+range, which the citation regex didn't parse, silently under-counting
+faithfulness (a query showed "4 citations found" when the answer actually
+contained 5). Fixed by extending the regex to accept an optional range
+(`\d+(?:-\d+)?` instead of requiring `\d+-\d+`), and treating a
+single-line citation as a zero-width range for the containment check.
+Verified with a standalone test before shipping, then re-ran the full
+20-question eval set to confirm no regression: retrieval numbers
+unchanged, faithfulness still 20/20 (100%).
+
+## Next steps (Day 8+)
+
+- Multi-hop query decomposition — breaking a compound question ("where is X handled and how does it interact with Y") into sub-queries, retrieving for each, then synthesizing
+- Multi-tenancy and usage tracking — real architecture needed if/when this becomes a multi-user product, deliberately deferred until there's real usage data to design around (see "Why not the bigger version" above)
 - Frontend: repo picker + Monaco code viewer + retrieval trace visualization — turning this from a script into something a non-technical person could actually click through
